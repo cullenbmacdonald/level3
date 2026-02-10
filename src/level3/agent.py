@@ -30,24 +30,18 @@ class AgentEvent:
 
 SYSTEM_PROMPT_TEMPLATE = """You are a personal assistant that can build its own capabilities.
 
-You have 4 bootstrap tools that are always available:
-execute_sql, write_capability, manage_tasks, restart.
+You have 4 bootstrap tools: execute_sql, write_capability, manage_tasks, restart.
 
 {capabilities_section}
 
-If a user asks you to do something you can't do yet, you can build a new capability
-using write_capability. Write the Python code, define the parameter schema, and
-register it. It will be immediately available.
+Most requests do NOT need a new capability. Answer questions, have conversations, and
+use existing tools directly. Only build a capability when:
+- The user needs something that requires external I/O (APIs, web requests, etc.)
+- The task will likely recur and benefits from being reusable
+- No existing capability already covers it
 
-When building capabilities, you MUST follow these rules:
-- The function MUST be async and accept two arguments: `async def name(params: dict[str, Any], pool: asyncpg.Pool) -> str:`
-- The second argument is the database connection pool — import asyncpg and use it if you need DB access, otherwise just ignore it
-- The function MUST return a string (use json.dumps for structured data)
-- The function name MUST match the capability name exactly
-- Available packages: httpx (for HTTP requests), json, asyncio, and the Python stdlib
-- Do NOT use `requests` — use `httpx` instead (it's already installed)
-- If you need a package that isn't installed, tell the user to run `uv add <package>`
-- Use the execute_sql tool if you need to create new tables or query data
+Do NOT build throwaway or debug capabilities. If a capability errors, fix it by calling
+write_capability again with corrected code — don't create a separate debug tool.
 
 {tasks_section}"""
 
@@ -132,8 +126,8 @@ async def _load_context(
     caps = get_loaded_capabilities()
     if caps:
         cap_lines = [f"- {name}: {td.description}" for name, td in caps.items()]
-        capabilities_section = (
-            f"You have {len(caps)} self-built capabilities:\n" + "\n".join(cap_lines)
+        capabilities_section = f"You have {len(caps)} self-built capabilities:\n" + "\n".join(
+            cap_lines
         )
     else:
         capabilities_section = "You have no self-built capabilities yet."
@@ -228,8 +222,7 @@ async def handle_message(
         # Save assistant message with tool calls
         await execute_query(
             pool,
-            "INSERT INTO conversations (role, content, tool_calls) "
-            "VALUES ($1, $2, $3::jsonb)",
+            "INSERT INTO conversations (role, content, tool_calls) VALUES ($1, $2, $3::jsonb)",
             ["assistant", content or "", json.dumps(tool_calls)],
         )
 
@@ -265,8 +258,7 @@ async def handle_message(
             # Save tool result
             await execute_query(
                 pool,
-                "INSERT INTO conversations (role, content, tool_call_id) "
-                "VALUES ($1, $2, $3)",
+                "INSERT INTO conversations (role, content, tool_call_id) VALUES ($1, $2, $3)",
                 ["tool", result, tc_id],
             )
 
