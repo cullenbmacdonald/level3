@@ -38,10 +38,14 @@ If a user asks you to do something you can't do yet, you can build a new capabil
 using write_capability. Write the Python code, define the parameter schema, and
 register it. It will be immediately available.
 
-When building capabilities:
+When building capabilities, you MUST follow these rules:
+- The function MUST be async: `async def name(params: dict[str, Any]) -> str:`
+- The function MUST return a string (use json.dumps for structured data)
+- The function name MUST match the capability name exactly
+- Available packages: httpx (for HTTP requests), json, asyncio, and the Python stdlib
+- Do NOT use `requests` — use `httpx` instead (it's already installed)
+- If you need a package that isn't installed, tell the user to run `uv add <package>`
 - Use the execute_sql tool if you need to create new tables or query data
-- Capabilities are async Python functions that take a params dict and return a string
-- You can install new packages by noting them — the user will run `uv add <package>`
 
 {tasks_section}"""
 
@@ -54,18 +58,46 @@ async def _load_context(
     # Recent messages
     rows = await execute_query(
         pool,
-        f"SELECT role, content, tool_call_id, tool_calls FROM conversations "
+        "SELECT role, content, tool_call_id, tool_calls FROM conversations "
         f"ORDER BY id DESC LIMIT {settings.max_conversation_history}",
     )
-    history: list[ChatCompletionMessageParam] = []
+    raw_history: list[dict[str, Any]] = []
     if isinstance(rows, list):
         for row in reversed(rows):
-            msg: dict[str, Any] = {"role": row["role"], "content": row["content"]}
+            # Parse tool_calls — asyncpg returns JSONB as strings
+            raw_tc = row.get("tool_calls")
+            tool_calls_list: list[dict[str, Any]] | None = None
+            if raw_tc:
+                tool_calls_list = json.loads(raw_tc) if isinstance(raw_tc, str) else raw_tc
+
+            msg: dict[str, Any] = {"role": row["role"]}
+
+            # For assistant messages with tool_calls and no text, omit content
+            # entirely — some providers reject null, others reject empty string.
+            if tool_calls_list and not row["content"]:
+                pass
+            else:
+                msg["content"] = row["content"]
+
             if row.get("tool_call_id"):
                 msg["tool_call_id"] = row["tool_call_id"]
-            if row.get("tool_calls"):
-                msg["tool_calls"] = row["tool_calls"]
-            history.append(msg)  # type: ignore[arg-type]
+            if tool_calls_list:
+                msg["tool_calls"] = tool_calls_list
+            raw_history.append(msg)
+
+    # Trim from the front to a clean boundary — the API requires that every
+    # assistant message with tool_calls is followed by its tool result messages.
+    # If our LIMIT truncated mid-exchange, drop messages until we hit a user
+    # or text-only assistant message.
+    while raw_history and (
+        raw_history[0].get("role") == "tool"
+        or raw_history[0].get("tool_calls") is not None
+    ):
+        raw_history.pop(0)
+
+    history: list[ChatCompletionMessageParam] = []
+    for msg in raw_history:
+        history.append(msg)  # type: ignore[arg-type]
 
     # Capabilities
     caps = get_loaded_capabilities()
@@ -158,12 +190,10 @@ async def handle_message(
             yield AgentEvent(type="assistant", content=text)
             return
 
-        # Process tool calls
-        assistant_msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": content or "",
-            "tool_calls": tool_calls,
-        }
+        # Process tool calls — omit content if empty for provider compatibility
+        assistant_msg: dict[str, Any] = {"role": "assistant", "tool_calls": tool_calls}
+        if content:
+            assistant_msg["content"] = content
         messages.append(assistant_msg)  # type: ignore[arg-type]
 
         # Save assistant message with tool calls
@@ -210,6 +240,10 @@ async def handle_message(
                 "VALUES ($1, $2, $3)",
                 ["tool", result, tc_id],
             )
+
+        # Re-collect tools after each round — write_capability/restart may have
+        # added new capabilities that need to be available on the next iteration.
+        tool_schemas, tool_map = _collect_tools()
 
     # Hit max iterations
     yield AgentEvent(type="error", content="Max tool iterations reached")

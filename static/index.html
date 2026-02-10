@@ -20,10 +20,21 @@
   #send { padding: 0.75rem 1.5rem; border-radius: 0.5rem; border: none; background: #2563eb; color: white; font-size: 1rem; cursor: pointer; }
   #send:hover { background: #1d4ed8; }
   #send:disabled { opacity: 0.5; cursor: not-allowed; }
+  #status { align-self: flex-start; padding: 0.5rem 1rem; color: #666; font-size: 0.85rem; display: none; }
+  #status.visible { display: flex; align-items: center; gap: 0.5rem; }
+  @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+  #status .dot { width: 6px; height: 6px; background: #2563eb; border-radius: 50%; animation: pulse 1.2s ease-in-out infinite; }
+  #status .dot:nth-child(2) { animation-delay: 0.2s; }
+  #status .dot:nth-child(3) { animation-delay: 0.4s; }
 </style>
 </head>
 <body>
-<div id="messages"></div>
+<div id="messages">
+  <div id="status">
+    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+    <span id="status-text">Thinking...</span>
+  </div>
+</div>
 <div id="input-area">
   <input id="input" type="text" placeholder="Say something..." autocomplete="off" />
   <button id="send">Send</button>
@@ -32,8 +43,21 @@
 const messages = document.getElementById('messages');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
+const status = document.getElementById('status');
+const statusText = document.getElementById('status-text');
 
 let ws = null;
+let waiting = false;
+
+function setStatus(text) {
+  if (text) {
+    statusText.textContent = text;
+    status.classList.add('visible');
+  } else {
+    status.classList.remove('visible');
+  }
+  messages.scrollTop = messages.scrollHeight;
+}
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -45,6 +69,13 @@ function connect() {
 
   ws.onmessage = (e) => {
     const data = JSON.parse(e.data);
+
+    if (data.type === 'tool_call') {
+      setStatus(`Running ${data.name}...`);
+    } else if (data.type === 'tool_result') {
+      setStatus('Thinking...');
+    }
+
     const div = document.createElement('div');
     div.classList.add('msg', data.type === 'tool_call' || data.type === 'tool_result' ? 'tool' : data.type);
 
@@ -58,28 +89,39 @@ function connect() {
       div.textContent = data.content;
     }
 
-    messages.appendChild(div);
+    // Insert before the status indicator
+    messages.insertBefore(div, status);
     messages.scrollTop = messages.scrollHeight;
+
+    if (data.type === 'assistant' || data.type === 'error') {
+      setStatus(null);
+      waiting = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
   };
 
   ws.onclose = () => {
     sendBtn.disabled = true;
+    setStatus(null);
     setTimeout(connect, 2000);
   };
 }
 
 function send() {
   const text = input.value.trim();
-  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN || waiting) return;
 
   const div = document.createElement('div');
   div.classList.add('msg', 'user');
   div.textContent = text;
-  messages.appendChild(div);
-  messages.scrollTop = messages.scrollHeight;
+  messages.insertBefore(div, status);
 
   ws.send(JSON.stringify({ type: 'message', content: text }));
   input.value = '';
+  waiting = true;
+  sendBtn.disabled = true;
+  setStatus('Thinking...');
 }
 
 sendBtn.onclick = send;

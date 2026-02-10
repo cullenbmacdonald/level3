@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import sys
 from typing import Any
@@ -38,7 +39,12 @@ async def load_capabilities(
 
             fn = getattr(module, name)
             raw_schema = row["tool_schema"]
-            schema: dict[str, Any] = raw_schema if isinstance(raw_schema, dict) else {}
+            if isinstance(raw_schema, str):
+                schema: dict[str, Any] = json.loads(raw_schema)
+            elif isinstance(raw_schema, dict):
+                schema = raw_schema
+            else:
+                schema = {}
 
             capabilities[name] = ToolDefinition(
                 name=name,

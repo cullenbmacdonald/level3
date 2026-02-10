@@ -290,7 +290,7 @@ On startup (and on reload):
 1. Query `capabilities` table for all registered capabilities
 2. For each row, `importlib.import_module(f"level3.capabilities.{name}")` (or `importlib.reload` if already loaded)
 3. Extract the function with `getattr(module, name)`
-4. Build the OpenAI tool definition from the `tool_schema` JSONB column
+4. Parse the `tool_schema` JSONB column — **asyncpg returns JSONB as strings, not dicts**, so you must `json.loads()` if it's a string
 5. Return a `dict[str, ToolDefinition]` mapping name -> (function, schema)
 
 ```python
@@ -307,7 +307,9 @@ class ToolDefinition:
 The core loop that handles a single user message:
 
 ```
-1. Load recent conversation history from DB (last 50 messages, configurable)
+1. Load recent conversation history from DB (last 50 messages, configurable). History includes tool call/result messages for full context. Two critical post-processing steps:
+   - **Trim orphaned tool messages**: trim from the front to the nearest clean boundary (a user or text-only assistant message) — the API requires every assistant message with `tool_calls` to be followed by matching tool result messages, so if the LIMIT truncates mid-exchange, drop orphaned messages from the start.
+   - **Omit content on tool-call assistant messages**: the DB stores `content = ''` (NOT NULL constraint), but when loading, omit the `content` field entirely for assistant messages that have `tool_calls` and empty content. This matches the omit-content-field pattern from step 6a.
 2. Load any tasks due in the next hour
 3. Build system prompt:
    - Who you are (a self-building assistant)
@@ -317,9 +319,10 @@ The core loop that handles a single user message:
 4. Collect all tool definitions (bootstrap + loaded capabilities)
 5. Call LLM with: system prompt + conversation history + user message + tools
 6. If response contains tool calls:
-   a. Execute each tool call
-   b. Append tool results to messages
-   c. Call LLM again with updated messages (loop until no more tool calls)
+   a. Append the assistant message to the messages list. **Omit the `content` field entirely** when the assistant has no text alongside tool calls — some providers reject `content: null`, others reject `content: ""`. Omitting is the safest cross-provider approach.
+   b. Execute each tool call, append each result as `{"role": "tool", "content": result, "tool_call_id": tc_id}`
+   c. **Re-collect tools** after each round of tool executions — `write_capability` or `restart(mode='reload')` may have registered new capabilities that need to be available on the next iteration within the same turn.
+   d. Call LLM again with updated messages (loop until no more tool calls)
 7. Save all messages (user, assistant, tool) to conversations table
 8. Return final assistant message
 ```
@@ -358,10 +361,14 @@ If a user asks you to do something you can't do yet, you can build a new capabil
 using write_capability. Write the Python code, define the parameter schema, and
 register it. It will be immediately available.
 
-When building capabilities:
+When building capabilities, you MUST follow these rules:
+- The function MUST be async: `async def name(params: dict[str, Any]) -> str:`
+- The function MUST return a string (use json.dumps for structured data)
+- The function name MUST match the capability name exactly
+- Available packages: httpx (for HTTP requests), json, asyncio, and the Python stdlib
+- Do NOT use `requests` — use `httpx` instead (it's already installed)
+- If you need a package that isn't installed, tell the user to run `uv add <package>`
 - Use the execute_sql tool if you need to create new tables or query data
-- Capabilities are async Python functions that take a params dict and return a string
-- You can install new packages by noting them — the user will run `uv add <package>`
 
 {tasks_section}
 ```
@@ -449,7 +456,7 @@ plugins = ["pydantic.mypy"]
 2. **config.py** — Pydantic Settings class with provider/model/db config, .env support
 3. **db.py** — asyncpg pool init/teardown, `execute_query(pool, query, params=None)` helper that returns `list[dict]` for SELECT or `int` row count for mutations. Uses `$1, $2` placeholders with a `list[Any]` params arg.
 4. **schema.sql** — the 3 bootstrap tables (above), applied on startup via `db.py`
-5. **llm.py** — `create_client(settings)` returns OpenAI client with correct base_url. `chat(client, model, messages, tools)` calls `client.chat.completions.create()` and returns the parsed response.
+5. **llm.py** — `create_client(settings)` returns `AsyncOpenAI` with correct base_url/api_key. `chat(client, model, messages, tools)` calls `client.chat.completions.create()` and returns a dict with `content: str | None` and `tool_calls: list[dict] | None`. Each tool call dict must include `"type": "function"` alongside `"id"` and `"function"` — this is required by the OpenAI API when tool calls are sent back in message history.
 6. **bootstrap_tools.py** — implement 4 tools. Each tool is a Pydantic params model + async function + OpenAI tool schema dict. Export a `BOOTSTRAP_TOOLS: list[ToolDefinition]` with all four.
 7. **agent.py** — `handle_message(user_message, pool, client, settings) -> AsyncGenerator[AgentEvent]`. Loads history, builds prompt, calls LLM, executes tool calls in a loop, yields events (tool_call, tool_result, assistant), saves to DB.
 8. **main.py** — FastAPI app. `lifespan` creates asyncpg pool + runs schema.sql + creates OpenAI client. Websocket `/chat` endpoint reads messages, calls `handle_message`, sends events to client. Serves `static/` directory.
