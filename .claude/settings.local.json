@@ -4,7 +4,8 @@
       "Bash(docker run:*)",
       "Bash(psql:*)",
       "Bash(bash:*)",
-      "Bash(lsof:*)"
+      "Bash(lsof:*)",
+      "Bash(git restore:*)"
     ]
   }
 }

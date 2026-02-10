@@ -16,8 +16,8 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = ""
     heartbeat_interval: int = 300
-    max_conversation_history: int = 50
-    max_tool_iterations: int = 10
+    max_conversation_history: int = 100
+    max_tool_iterations: int = 30
 
     model_config = {"env_file": ".env"}
 
