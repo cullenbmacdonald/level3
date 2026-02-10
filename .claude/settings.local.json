@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker run:*)",
+      "Bash(psql:*)",
+      "Bash(bash:*)",
+      "Bash(lsof:*)"
+    ]
+  }
+}

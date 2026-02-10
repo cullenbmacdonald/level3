@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
@@ -39,7 +40,8 @@ using write_capability. Write the Python code, define the parameter schema, and
 register it. It will be immediately available.
 
 When building capabilities, you MUST follow these rules:
-- The function MUST be async: `async def name(params: dict[str, Any]) -> str:`
+- The function MUST be async and accept two arguments: `async def name(params: dict[str, Any], pool: asyncpg.Pool) -> str:`
+- The second argument is the database connection pool — import asyncpg and use it if you need DB access, otherwise just ignore it
 - The function MUST return a string (use json.dumps for structured data)
 - The function name MUST match the capability name exactly
 - Available packages: httpx (for HTTP requests), json, asyncio, and the Python stdlib
@@ -85,19 +87,46 @@ async def _load_context(
                 msg["tool_calls"] = tool_calls_list
             raw_history.append(msg)
 
-    # Trim from the front to a clean boundary — the API requires that every
-    # assistant message with tool_calls is followed by its tool result messages.
-    # If our LIMIT truncated mid-exchange, drop messages until we hit a user
-    # or text-only assistant message.
-    while raw_history and (
-        raw_history[0].get("role") == "tool"
-        or raw_history[0].get("tool_calls") is not None
-    ):
-        raw_history.pop(0)
-
+    # Sanitize history — the API requires every assistant message with
+    # tool_calls to be immediately followed by matching tool result messages.
+    # Orphans can appear anywhere (front, middle, end) due to truncation,
+    # crashes, or interrupted restarts.  Walk the history and collect the
+    # tool_call IDs we expect results for; drop any exchange that is
+    # incomplete.
     history: list[ChatCompletionMessageParam] = []
-    for msg in raw_history:
+    i = 0
+    while i < len(raw_history):
+        msg = raw_history[i]
+
+        # Orphaned tool result at current position — skip it
+        if msg.get("role") == "tool":
+            i += 1
+            continue
+
+        # Assistant message with tool_calls — verify all results follow
+        if msg.get("tool_calls"):
+            expected_ids = {tc["id"] for tc in msg["tool_calls"]}
+            # Collect the following tool result messages
+            j = i + 1
+            found_ids: set[str] = set()
+            while j < len(raw_history) and raw_history[j].get("role") == "tool":
+                tid = raw_history[j].get("tool_call_id")
+                if tid:
+                    found_ids.add(tid)
+                j += 1
+            if expected_ids == found_ids:
+                # Complete exchange — keep it all
+                for k in range(i, j):
+                    history.append(raw_history[k])  # type: ignore[arg-type]
+                i = j
+            else:
+                # Incomplete — skip the assistant msg and any partial results
+                i = j
+            continue
+
+        # Regular message (user or text-only assistant) — keep it
         history.append(msg)  # type: ignore[arg-type]
+        i += 1
 
     # Capabilities
     caps = get_loaded_capabilities()
@@ -240,6 +269,14 @@ async def handle_message(
                 "VALUES ($1, $2, $3)",
                 ["tool", result, tc_id],
             )
+
+            # Handle deferred restart — exit after result is safely persisted
+            try:
+                parsed_result = json.loads(result)
+                if isinstance(parsed_result, dict) and parsed_result.get("_restart"):
+                    sys.exit(42)
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         # Re-collect tools after each round — write_capability/restart may have
         # added new capabilities that need to be available on the next iteration.

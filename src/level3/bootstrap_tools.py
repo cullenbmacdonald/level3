@@ -161,7 +161,7 @@ WRITE_CAPABILITY_SCHEMA: dict[str, Any] = {
         "description": (
             "Write a new capability as a Python file in capabilities/, register it in the DB, "
             "and hot-reload it. The code must define an async function with the same name as "
-            "the capability that accepts a single dict argument and returns a string."
+            "the capability that accepts (params: dict, pool: asyncpg.Pool) and returns a string."
         ),
         "parameters": {
             "type": "object",
@@ -348,7 +348,7 @@ async def restart(
 ) -> str:
     parsed = RestartParams(**params)
     if parsed.mode == "full":
-        sys.exit(42)
+        return json.dumps({"status": "restarting", "_restart": True})
     elif parsed.mode == "reload":
         from level3.capability_loader import reload_capabilities
 
