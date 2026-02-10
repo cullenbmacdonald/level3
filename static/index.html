@@ -76,22 +76,7 @@ function connect() {
       setStatus('Thinking...');
     }
 
-    const div = document.createElement('div');
-    div.classList.add('msg', data.type === 'tool_call' || data.type === 'tool_result' ? 'tool' : data.type);
-
-    if (data.type === 'tool_call') {
-      div.textContent = `[${data.name}] ${JSON.stringify(data.arguments)}`;
-      div.onclick = () => div.classList.toggle('expanded');
-    } else if (data.type === 'tool_result') {
-      div.textContent = `[${data.name} result] ${data.content}`;
-      div.onclick = () => div.classList.toggle('expanded');
-    } else {
-      div.textContent = data.content;
-    }
-
-    // Insert before the status indicator
-    messages.insertBefore(div, status);
-    messages.scrollTop = messages.scrollHeight;
+    renderMessage(data);
 
     if (data.type === 'assistant' || data.type === 'error') {
       setStatus(null);
@@ -124,9 +109,40 @@ function send() {
   setStatus('Thinking...');
 }
 
+function renderMessage(data) {
+  const div = document.createElement('div');
+  div.classList.add('msg', data.type === 'tool_call' || data.type === 'tool_result' ? 'tool' : data.type);
+
+  if (data.type === 'tool_call') {
+    div.textContent = `[${data.name}] ${JSON.stringify(data.arguments)}`;
+    div.onclick = () => div.classList.toggle('expanded');
+  } else if (data.type === 'tool_result') {
+    div.textContent = `[${data.name} result] ${data.content}`;
+    div.onclick = () => div.classList.toggle('expanded');
+  } else {
+    div.textContent = data.content;
+  }
+
+  messages.insertBefore(div, status);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+async function loadHistory() {
+  try {
+    const res = await fetch('/api/history');
+    const events = await res.json();
+    for (const event of events) {
+      renderMessage(event);
+    }
+  } catch (e) {
+    // History unavailable — not critical
+  }
+}
+
 sendBtn.onclick = send;
 input.onkeydown = (e) => { if (e.key === 'Enter') send(); };
 
+loadHistory();
 connect();
 </script>
 </body>

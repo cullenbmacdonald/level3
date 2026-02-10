@@ -7,6 +7,7 @@ from typing import Any
 
 import asyncpg
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from level3.agent import AgentEvent, handle_message
@@ -73,6 +74,52 @@ async def chat_endpoint(websocket: WebSocket) -> None:
 
     except WebSocketDisconnect:
         logger.info("Client disconnected")
+
+
+@app.get("/api/history")
+async def get_history() -> JSONResponse:
+    rows = await state.pool.fetch(
+        "SELECT role, content, tool_call_id, tool_calls, created_at "
+        "FROM conversations ORDER BY id DESC LIMIT 200"
+    )
+    rows = list(reversed(rows))
+
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        role = row["role"]
+        content = row["content"] or ""
+        tool_calls_raw = row["tool_calls"]
+        tool_call_id = row["tool_call_id"]
+
+        if role == "user":
+            events.append({"type": "user", "content": content})
+        elif role == "assistant":
+            if tool_calls_raw:
+                tc_list = json.loads(tool_calls_raw) if isinstance(tool_calls_raw, str) else tool_calls_raw
+                for tc in tc_list:
+                    fn_name = tc["function"]["name"]
+                    fn_args_str = tc["function"]["arguments"]
+                    try:
+                        fn_args = json.loads(fn_args_str)
+                    except (json.JSONDecodeError, TypeError):
+                        fn_args = {}
+                    events.append({
+                        "type": "tool_call",
+                        "name": fn_name,
+                        "content": fn_args_str,
+                        "arguments": fn_args,
+                    })
+            else:
+                events.append({"type": "assistant", "content": content})
+        elif role == "tool":
+            tool_name = ""
+            for prev in reversed(events):
+                if prev.get("type") == "tool_call":
+                    tool_name = prev.get("name", "")
+                    break
+            events.append({"type": "tool_result", "name": tool_name, "content": content})
+
+    return JSONResponse(events)
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
