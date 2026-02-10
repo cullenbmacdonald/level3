@@ -24,6 +24,7 @@
 - **Async throughout.** FastAPI is async, asyncpg is async, the heartbeat loop is async. No blocking calls in the main loop.
 - **Pydantic for validation.** Tool schemas, config, API models — all Pydantic BaseModel.
 - **No classes where functions suffice.** Keep it simple. Use dataclasses/Pydantic for data, plain functions for logic.
+- **Parameterized SQL everywhere.** Never use string interpolation (`f""`, `$$...$$`) for SQL values. Always use asyncpg's `$1, $2` parameter placeholders and pass values as a params list. User-generated content (conversation messages, task titles, capability code) will break `$$` quoting.
 
 ## Project Structure
 
@@ -102,6 +103,12 @@ HEARTBEAT_INTERVAL=300    # seconds between task checks, default 300 (5 min)
 ```python
 from pydantic_settings import BaseSettings
 
+PROVIDER_BASE_URLS: dict[str, str] = {
+    "ollama": "http://localhost:11434/v1",
+    "lmstudio": "http://localhost:1234/v1",
+    "anthropic": "https://api.anthropic.com/v1/",
+}
+
 class Settings(BaseSettings):
     database_url: str
     llm_provider: str = "anthropic"
@@ -109,8 +116,22 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = ""  # derived from provider if empty
     heartbeat_interval: int = 300
+    max_conversation_history: int = 50
+    max_tool_iterations: int = 10
 
     model_config = {"env_file": ".env"}
+
+    def get_base_url(self) -> str:
+        if self.llm_base_url:
+            return self.llm_base_url
+        return PROVIDER_BASE_URLS.get(self.llm_provider, "")
+
+    def get_api_key(self) -> str:
+        if self.llm_api_key:
+            return self.llm_api_key
+        if self.llm_provider in ("ollama", "lmstudio"):
+            return "not-needed"
+        return ""
 ```
 
 Provider-to-base-url mapping:
@@ -155,7 +176,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 ## Bootstrap Tool Definitions
 
-Each bootstrap tool is defined as a Python function with a Pydantic model for its parameters. The tool schema for the OpenAI API is generated from the Pydantic model using a helper function.
+Each bootstrap tool is defined as: a Pydantic model for parameter validation, an async function that takes `(params: dict[str, Any], pool: asyncpg.Pool)` and returns `str`, and a hand-written OpenAI tool schema dict. The function receives raw dicts from the agent loop and parses them internally with the Pydantic model.
+
+Additionally, `db.py` must export a `rows_to_json(rows: list[dict[str, Any]]) -> str` helper that serializes query results to JSON with a custom `default=str` handler (for datetimes and other non-serializable types).
+
+`schema.sql` lives at the project root. `db.py` resolves it via `Path(__file__).resolve().parent.parent.parent / "schema.sql"`.
 
 ### execute_sql
 
@@ -163,8 +188,9 @@ Each bootstrap tool is defined as a Python function with a Pydantic model for it
 class ExecuteSqlParams(BaseModel):
     query: str = Field(description="SQL query to execute")
 
-async def execute_sql(params: ExecuteSqlParams, pool: Pool) -> str:
+async def execute_sql(params: dict[str, Any], pool: asyncpg.Pool[asyncpg.Record]) -> str:
     """Execute an arbitrary SQL query against the database. Returns rows as JSON for SELECT, or row count for mutations."""
+    # Parses params internally: ExecuteSqlParams(**params)
 ```
 
 Tool schema:
@@ -194,9 +220,18 @@ class WriteCapabilityParams(BaseModel):
     code: str = Field(description="Full Python source code for the capability module")
     parameters_schema: dict[str, Any] = Field(description="JSON Schema for the tool parameters (OpenAI function calling format)")
 
-async def write_capability(params: WriteCapabilityParams, pool: Pool) -> str:
+async def write_capability(params: dict[str, Any], pool: asyncpg.Pool[asyncpg.Record]) -> str:
     """Write a new capability as a Python file in capabilities/, register it in the DB, and hot-reload it. The code must define an async function with the same name as the capability that accepts a single dict argument and returns a string."""
+    # Parses params internally: WriteCapabilityParams(**params)
 ```
+
+**Validation pipeline** (code is validated before being committed to disk/DB):
+
+1. **Syntax check** — `compile(code, name, "exec")` before writing. On failure, returns `{"error": "syntax_error", "message": ..., "line": ..., "offset": ...}` so the LLM can fix the exact line.
+2. **Import check** — after writing the file, attempts `importlib.import_module()`. On failure, deletes the file and returns `{"error": "import_error", "message": ...}`.
+3. **Function existence check** — verifies the module defines a callable with the expected name. On failure, deletes the file and returns `{"error": "missing_function", "message": ...}`.
+
+Only after all three checks pass does the tool register the capability in the DB and hot-reload it. The LLM receives structured error JSON so it can reason about the failure and retry.
 
 ### manage_tasks
 
@@ -209,8 +244,9 @@ class ManageTasksParams(BaseModel):
     status: str | None = Field(default=None, description="New status (for update)")
     due_at: str | None = Field(default=None, description="Due date as ISO 8601 string")
 
-async def manage_tasks(params: ManageTasksParams, pool: Pool) -> str:
+async def manage_tasks(params: dict[str, Any], pool: asyncpg.Pool[asyncpg.Record]) -> str:
     """Create, list, update, complete, or delete tasks. Returns task data as JSON."""
+    # Parses params internally: ManageTasksParams(**params)
 ```
 
 ### restart
@@ -219,8 +255,9 @@ async def manage_tasks(params: ManageTasksParams, pool: Pool) -> str:
 class RestartParams(BaseModel):
     mode: str = Field(default="reload", description="'reload' to hot-reload capabilities, 'full' to restart the process")
 
-async def restart(params: RestartParams, pool: Pool) -> str:
+async def restart(params: dict[str, Any], pool: asyncpg.Pool[asyncpg.Record]) -> str:
     """Reload capabilities from disk (mode='reload') or restart the entire process (mode='full', exits with code 42)."""
+    # Parses params internally: RestartParams(**params)
 ```
 
 ## Capability File Convention
@@ -289,24 +326,44 @@ The core loop that handles a single user message:
 
 Max tool call iterations per turn: 10 (prevent runaway loops).
 
+### AgentEvent
+
+The agent loop yields events as a dataclass:
+
+```python
+@dataclass
+class AgentEvent:
+    type: str  # "assistant", "tool_call", "tool_result", "error"
+    content: str
+    name: str | None = None        # tool name (for tool_call and tool_result)
+    arguments: dict[str, Any] | None = None  # parsed args (for tool_call)
+```
+
 ### System Prompt
+
+The system prompt is a Python format string with two placeholders: `{capabilities_section}` and `{tasks_section}`. These are built by `_load_context()`:
+
+- `capabilities_section`: either "You have no self-built capabilities yet." or a bulleted list like "You have 3 self-built capabilities:\n- check_email: ..."
+- `tasks_section`: either empty string or "Current tasks due soon:\n" + JSON of due tasks
 
 ```
 You are a personal assistant that can build its own capabilities.
 
-You have {n} bootstrap tools that are always available: execute_sql, write_capability, manage_tasks, restart.
+You have 4 bootstrap tools that are always available:
+execute_sql, write_capability, manage_tasks, restart.
 
-You have {m} self-built capabilities: {list of capability names and descriptions}.
+{capabilities_section}
 
-If a user asks you to do something you can't do yet, you can build a new capability using write_capability. Write the Python code, define the parameter schema, and register it. It will be immediately available.
+If a user asks you to do something you can't do yet, you can build a new capability
+using write_capability. Write the Python code, define the parameter schema, and
+register it. It will be immediately available.
 
 When building capabilities:
 - Use the execute_sql tool if you need to create new tables or query data
 - Capabilities are async Python functions that take a params dict and return a string
 - You can install new packages by noting them — the user will run `uv add <package>`
 
-Current tasks due soon:
-{tasks}
+{tasks_section}
 ```
 
 ## Websocket Protocol
@@ -376,7 +433,7 @@ target-version = "py314"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "UP", "ANN", "B", "A", "SIM", "TCH"]
+select = ["E", "F", "I", "N", "UP", "ANN", "B", "A", "SIM"]
 
 [tool.mypy]
 strict = true
@@ -390,7 +447,7 @@ plugins = ["pydantic.mypy"]
 
 1. **Project setup** — `uv init`, write pyproject.toml, `uv sync`, create directory structure
 2. **config.py** — Pydantic Settings class with provider/model/db config, .env support
-3. **db.py** — asyncpg pool init/teardown, `execute_query()` helper that returns list[dict] or row count
+3. **db.py** — asyncpg pool init/teardown, `execute_query(pool, query, params=None)` helper that returns `list[dict]` for SELECT or `int` row count for mutations. Uses `$1, $2` placeholders with a `list[Any]` params arg.
 4. **schema.sql** — the 3 bootstrap tables (above), applied on startup via `db.py`
 5. **llm.py** — `create_client(settings)` returns OpenAI client with correct base_url. `chat(client, model, messages, tools)` calls `client.chat.completions.create()` and returns the parsed response.
 6. **bootstrap_tools.py** — implement 4 tools. Each tool is a Pydantic params model + async function + OpenAI tool schema dict. Export a `BOOTSTRAP_TOOLS: list[ToolDefinition]` with all four.

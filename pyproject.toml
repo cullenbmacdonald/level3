@@ -1,0 +1,40 @@
+[project]
+name = "level3"
+version = "0.1.0"
+description = "A self-building personal assistant"
+readme = "README.md"
+authors = [
+    { name = "cullenmacdonald", email = "hello@cullenmacdonald.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "openai",
+    "asyncpg",
+    "pydantic",
+    "pydantic-settings",
+]
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "ruff",
+    "asyncpg-stubs",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.17,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "ANN", "B", "A", "SIM"]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+plugins = ["pydantic.mypy"]
