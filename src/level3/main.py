@@ -89,13 +89,16 @@ async def get_history() -> JSONResponse:
         role = row["role"]
         content = row["content"] or ""
         tool_calls_raw = row["tool_calls"]
-        tool_call_id = row["tool_call_id"]
 
         if role == "user":
             events.append({"type": "user", "content": content})
         elif role == "assistant":
             if tool_calls_raw:
-                tc_list = json.loads(tool_calls_raw) if isinstance(tool_calls_raw, str) else tool_calls_raw
+                tc_list = (
+                    json.loads(tool_calls_raw)
+                    if isinstance(tool_calls_raw, str)
+                    else tool_calls_raw
+                )
                 for tc in tc_list:
                     fn_name = tc["function"]["name"]
                     fn_args_str = tc["function"]["arguments"]
