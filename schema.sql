@@ -7,14 +7,24 @@ CREATE TABLE IF NOT EXISTS capabilities (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS conversation_threads (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT 'New conversation',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS conversations (
     id SERIAL PRIMARY KEY,
+    thread_id INTEGER REFERENCES conversation_threads(id),
     role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
     content TEXT NOT NULL,
     tool_call_id TEXT,
     tool_calls JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_conversations_thread_id ON conversations(thread_id);
 
 CREATE TABLE IF NOT EXISTS tasks (
     id SERIAL PRIMARY KEY,

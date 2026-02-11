@@ -49,13 +49,16 @@ write_capability again with corrected code — don't create a separate debug too
 async def _load_context(
     pool: asyncpg.Pool[asyncpg.Record],
     settings: Settings,
+    thread_id: int,
 ) -> tuple[list[ChatCompletionMessageParam], str]:
     """Load recent conversation history and build system prompt context."""
-    # Recent messages
+    # Recent messages scoped to this thread
     rows = await execute_query(
         pool,
         "SELECT role, content, tool_call_id, tool_calls FROM conversations "
+        "WHERE thread_id = $1 "
         f"ORDER BY id DESC LIMIT {settings.max_conversation_history}",
+        [thread_id],
     )
     raw_history: list[dict[str, Any]] = []
     if isinstance(rows, list):
@@ -173,22 +176,29 @@ async def handle_message(
     pool: asyncpg.Pool[asyncpg.Record],
     client: AsyncOpenAI,
     settings: Settings,
+    thread_id: int,
 ) -> AsyncGenerator[AgentEvent]:
     """Process a user message through the agent loop, yielding events."""
     # Save user message
     await execute_query(
         pool,
-        "INSERT INTO conversations (role, content) VALUES ($1, $2)",
-        ["user", user_message],
+        "INSERT INTO conversations (thread_id, role, content) VALUES ($1, $2, $3)",
+        [thread_id, "user", user_message],
     )
 
-    history, system_prompt = await _load_context(pool, settings)
+    # Update thread timestamp
+    await execute_query(
+        pool,
+        "UPDATE conversation_threads SET updated_at = now() WHERE id = $1",
+        [thread_id],
+    )
+
+    history, system_prompt = await _load_context(pool, settings, thread_id)
     tool_schemas, tool_map = _collect_tools()
 
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
         *history,
-        {"role": "user", "content": user_message},
     ]
 
     for _iteration in range(settings.max_tool_iterations):
@@ -207,8 +217,8 @@ async def handle_message(
             text = content or ""
             await execute_query(
                 pool,
-                "INSERT INTO conversations (role, content) VALUES ($1, $2)",
-                ["assistant", text],
+                "INSERT INTO conversations (thread_id, role, content) VALUES ($1, $2, $3)",
+                [thread_id, "assistant", text],
             )
             yield AgentEvent(type="assistant", content=text)
             return
@@ -222,8 +232,8 @@ async def handle_message(
         # Save assistant message with tool calls
         await execute_query(
             pool,
-            "INSERT INTO conversations (role, content, tool_calls) VALUES ($1, $2, $3::jsonb)",
-            ["assistant", content or "", json.dumps(tool_calls)],
+            "INSERT INTO conversations (thread_id, role, content, tool_calls) VALUES ($1, $2, $3, $4::jsonb)",
+            [thread_id, "assistant", content or "", json.dumps(tool_calls)],
         )
 
         for tc in tool_calls:
@@ -258,8 +268,8 @@ async def handle_message(
             # Save tool result
             await execute_query(
                 pool,
-                "INSERT INTO conversations (role, content, tool_call_id) VALUES ($1, $2, $3)",
-                ["tool", result, tc_id],
+                "INSERT INTO conversations (thread_id, role, content, tool_call_id) VALUES ($1, $2, $3, $4)",
+                [thread_id, "tool", result, tc_id],
             )
 
             # Handle deferred restart — exit after result is safely persisted
