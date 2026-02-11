@@ -4,15 +4,16 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Level 3</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0a; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
   #messages { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.5rem; }
-  .msg { max-width: 80%; padding: 0.75rem 1rem; border-radius: 0.75rem; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
-  .msg.user { align-self: flex-end; background: #2563eb; color: white; }
+  .msg { max-width: 80%; padding: 0.75rem 1rem; border-radius: 0.75rem; line-height: 1.6; word-wrap: break-word; overflow-wrap: break-word; flex-shrink: 0; }
+  .msg.user { align-self: flex-end; background: #2563eb; color: white; white-space: pre-wrap; }
   .msg.assistant { align-self: flex-start; background: #1e1e1e; }
-  .msg.tool { align-self: flex-start; background: #1a1a2e; font-family: monospace; font-size: 0.8rem; color: #888; cursor: pointer; max-height: 2.5rem; overflow: hidden; transition: max-height 0.2s; }
-  .msg.tool.expanded { max-height: none; }
   .msg.error { align-self: flex-start; background: #2d1111; color: #ef4444; }
   #input-area { display: flex; padding: 1rem; gap: 0.5rem; border-top: 1px solid #222; }
   #input { flex: 1; padding: 0.75rem; border-radius: 0.5rem; border: 1px solid #333; background: #111; color: #e0e0e0; font-size: 1rem; outline: none; }
@@ -20,12 +21,277 @@
   #send { padding: 0.75rem 1.5rem; border-radius: 0.5rem; border: none; background: #2563eb; color: white; font-size: 1rem; cursor: pointer; }
   #send:hover { background: #1d4ed8; }
   #send:disabled { opacity: 0.5; cursor: not-allowed; }
-  #status { align-self: flex-start; padding: 0.5rem 1rem; color: #666; font-size: 0.85rem; display: none; }
+  #status { align-self: flex-start; padding: 0.5rem 1rem; color: #666; font-size: 0.85rem; display: none; flex-shrink: 0; }
   #status.visible { display: flex; align-items: center; gap: 0.5rem; }
   @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
   #status .dot { width: 6px; height: 6px; background: #2563eb; border-radius: 50%; animation: pulse 1.2s ease-in-out infinite; }
   #status .dot:nth-child(2) { animation-delay: 0.2s; }
   #status .dot:nth-child(3) { animation-delay: 0.4s; }
+
+  /* ── Tool use styles ── */
+  .tool-group {
+    align-self: flex-start;
+    flex-shrink: 0;
+    max-width: 80%;
+    min-width: 280px;
+    border: 1px solid #1e2a3a;
+    border-radius: 10px;
+    background: #0d1520;
+    font-size: 0.85rem;
+  }
+
+  .tool-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.55rem 0.75rem;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+    border-radius: 10px;
+    min-height: 36px;
+  }
+  .tool-header:hover {
+    background: #131d2b;
+  }
+
+  .tool-icon {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #7eb8f7;
+  }
+  .tool-icon svg { width: 14px; height: 14px; }
+
+  .tool-name {
+    font-weight: 600;
+    color: #7eb8f7;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+
+  .tool-summary {
+    color: #667788;
+    font-size: 0.78rem;
+    margin-left: auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+  }
+
+  .tool-chevron {
+    color: #556677;
+    transition: transform 0.2s;
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    margin-left: 0.25rem;
+  }
+  .tool-group.expanded .tool-chevron {
+    transform: rotate(90deg);
+  }
+
+  .tool-details {
+    display: none;
+  }
+  .tool-group.expanded .tool-details {
+    display: block;
+    max-height: 600px;
+    overflow-y: auto;
+  }
+
+  .tool-section {
+    padding: 0.5rem 0.75rem;
+    border-top: 1px solid #1a2535;
+  }
+  .tool-section-label {
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #667788;
+    margin-bottom: 0.35rem;
+  }
+
+  .tool-params {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .tool-param {
+    display: flex;
+    gap: 0.4rem;
+    align-items: baseline;
+  }
+  .tool-param-key {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 0.78rem;
+    color: #a78bfa;
+    flex-shrink: 0;
+  }
+  .tool-param-key::after {
+    content: ':';
+    color: #445566;
+  }
+  .tool-param-value {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 0.78rem;
+    color: #8cc084;
+    word-break: break-all;
+  }
+  .tool-param-value.long {
+    display: block;
+    white-space: pre-wrap;
+    font-size: 0.75rem;
+    color: #8cc084;
+    background: #0a1018;
+    padding: 0.4rem 0.5rem;
+    border-radius: 4px;
+    margin-top: 0.2rem;
+    max-height: 200px;
+    overflow-y: auto;
+    width: 100%;
+  }
+
+  .tool-result-content {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 0.75rem;
+    color: #b0b8c4;
+    white-space: pre-wrap;
+    word-break: break-all;
+    background: #0a1018;
+    padding: 0.4rem 0.5rem;
+    border-radius: 4px;
+    max-height: 250px;
+    overflow-y: auto;
+  }
+
+  .tool-status-badge {
+    font-size: 0.65rem;
+    padding: 0.12rem 0.45rem;
+    border-radius: 4px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    flex-shrink: 0;
+  }
+  .tool-status-badge.running {
+    background: #1a2535;
+    color: #7eb8f7;
+  }
+  .tool-status-badge.done {
+    background: #132014;
+    color: #6ec66e;
+  }
+  .tool-status-badge.error {
+    background: #2d1111;
+    color: #ef4444;
+  }
+
+  /* ── Markdown content styles ── */
+  .msg.assistant p { margin: 0.4em 0; }
+  .msg.assistant p:first-child { margin-top: 0; }
+  .msg.assistant p:last-child { margin-bottom: 0; }
+
+  .msg.assistant h1, .msg.assistant h2, .msg.assistant h3,
+  .msg.assistant h4, .msg.assistant h5, .msg.assistant h6 {
+    margin: 0.6em 0 0.3em 0; font-weight: 600;
+  }
+  .msg.assistant h1 { font-size: 1.3em; }
+  .msg.assistant h2 { font-size: 1.15em; }
+  .msg.assistant h3 { font-size: 1.05em; }
+
+  .msg.assistant strong { font-weight: 700; color: #f0f0f0; }
+  .msg.assistant em { font-style: italic; color: #c8c8c8; }
+
+  .msg.assistant code {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    background: #2a2a2a;
+    padding: 0.15em 0.35em;
+    border-radius: 4px;
+    font-size: 0.88em;
+    color: #e8b4b8;
+  }
+
+  .msg.assistant pre {
+    background: #161616;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 0.8em 1em;
+    margin: 0.5em 0;
+    overflow-x: auto;
+    position: relative;
+  }
+  .msg.assistant pre code {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    font-size: 0.85em;
+    color: #d4d4d4;
+    white-space: pre;
+  }
+
+  .msg.assistant ul, .msg.assistant ol {
+    margin: 0.4em 0;
+    padding-left: 1.5em;
+  }
+  .msg.assistant li { margin: 0.2em 0; }
+  .msg.assistant li::marker { color: #666; }
+
+  .msg.assistant blockquote {
+    border-left: 3px solid #444;
+    padding: 0.3em 0.8em;
+    margin: 0.5em 0;
+    color: #aaa;
+    background: #161616;
+    border-radius: 0 6px 6px 0;
+  }
+
+  .msg.assistant a { color: #60a5fa; text-decoration: none; }
+  .msg.assistant a:hover { text-decoration: underline; }
+
+  .msg.assistant hr {
+    border: none;
+    border-top: 1px solid #333;
+    margin: 0.6em 0;
+  }
+
+  .msg.assistant table {
+    border-collapse: collapse;
+    margin: 0.5em 0;
+    font-size: 0.9em;
+  }
+  .msg.assistant th, .msg.assistant td {
+    border: 1px solid #333;
+    padding: 0.35em 0.7em;
+    text-align: left;
+  }
+  .msg.assistant th { background: #1a1a1a; font-weight: 600; }
+  .msg.assistant tr:nth-child(even) { background: #141414; }
+
+  /* Copy button for code blocks */
+  .code-block-wrapper {
+    position: relative;
+  }
+  .copy-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    background: #333;
+    color: #aaa;
+    border: none;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 0.7rem;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .code-block-wrapper:hover .copy-btn { opacity: 1; }
+  .copy-btn:hover { background: #444; color: #e0e0e0; }
 </style>
 </head>
 <body>
@@ -49,6 +315,277 @@ const statusText = document.getElementById('status-text');
 let ws = null;
 let waiting = false;
 
+// Track tool groups so results can be paired with their call
+let activeToolGroups = {};
+
+// SVG icons
+const ICON_TOOL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="#6ec66e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
+// Configure marked
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+  highlight: function(code, lang) {
+    if (lang && hljs.getLanguage(lang)) {
+      try { return hljs.highlight(code, { language: lang }).value; } catch (e) {}
+    }
+    try { return hljs.highlightAuto(code).value; } catch (e) {}
+    return code;
+  }
+});
+
+function renderMarkdown(text) {
+  let html = marked.parse(text);
+  html = html.replace(/<pre>/g, '<div class="code-block-wrapper"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre>');
+  html = html.replace(/<\/pre>/g, '</pre></div>');
+  return html;
+}
+
+function copyCode(btn) {
+  const pre = btn.parentElement.querySelector('pre');
+  const code = pre.innerText;
+  navigator.clipboard.writeText(code).then(function() {
+    btn.textContent = 'Copied!';
+    setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+  });
+}
+
+function escapeHtml(text) {
+  var d = document.createElement('div');
+  d.appendChild(document.createTextNode(text));
+  return d.innerHTML;
+}
+
+function formatParamValue(value) {
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value, null, 2);
+}
+
+function getParamSummary(args) {
+  if (!args || typeof args !== 'object') return '';
+  var keys = Object.keys(args);
+  if (keys.length === 0) return '';
+  for (var i = 0; i < keys.length; i++) {
+    var v = args[keys[i]];
+    if (typeof v === 'string' && v.length <= 50) return v;
+  }
+  return keys.length + ' param' + (keys.length > 1 ? 's' : '');
+}
+
+function tryFormatJSON(text) {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch (e) {
+    return text;
+  }
+}
+
+function createToolCallElement(data) {
+  var name = data.name || 'unknown';
+  var args = data.arguments || {};
+  var summary = getParamSummary(args);
+  var paramKeys = Object.keys(args);
+
+  var group = document.createElement('div');
+  group.className = 'tool-group';
+  group.setAttribute('data-tool-name', name);
+
+  // Build header
+  var header = document.createElement('div');
+  header.className = 'tool-header';
+
+  var iconSpan = document.createElement('span');
+  iconSpan.className = 'tool-icon';
+  iconSpan.innerHTML = ICON_TOOL;
+  header.appendChild(iconSpan);
+
+  var nameSpan = document.createElement('span');
+  nameSpan.className = 'tool-name';
+  nameSpan.textContent = name;
+  header.appendChild(nameSpan);
+
+  if (summary) {
+    var summarySpan = document.createElement('span');
+    summarySpan.className = 'tool-summary';
+    summarySpan.textContent = summary;
+    header.appendChild(summarySpan);
+  }
+
+  var badge = document.createElement('span');
+  badge.className = 'tool-status-badge running';
+  badge.textContent = 'running';
+  header.appendChild(badge);
+
+  var chevron = document.createElement('span');
+  chevron.className = 'tool-chevron';
+  chevron.textContent = '\u25B6';
+  header.appendChild(chevron);
+
+  header.addEventListener('click', function() {
+    group.classList.toggle('expanded');
+  });
+
+  group.appendChild(header);
+
+  // Build details
+  var details = document.createElement('div');
+  details.className = 'tool-details';
+
+  // Parameters section
+  if (paramKeys.length > 0) {
+    var paramSection = document.createElement('div');
+    paramSection.className = 'tool-section';
+
+    var paramLabel = document.createElement('div');
+    paramLabel.className = 'tool-section-label';
+    paramLabel.textContent = 'Parameters';
+    paramSection.appendChild(paramLabel);
+
+    var paramsDiv = document.createElement('div');
+    paramsDiv.className = 'tool-params';
+
+    for (var i = 0; i < paramKeys.length; i++) {
+      var key = paramKeys[i];
+      var val = formatParamValue(args[key]);
+      var isLong = val.length > 80 || val.indexOf('\n') !== -1;
+
+      var param = document.createElement('div');
+      param.className = 'tool-param';
+      if (isLong) {
+        param.style.flexDirection = 'column';
+      }
+
+      var keySpan = document.createElement('span');
+      keySpan.className = 'tool-param-key';
+      keySpan.textContent = key;
+      param.appendChild(keySpan);
+
+      var valSpan = document.createElement('span');
+      valSpan.className = 'tool-param-value' + (isLong ? ' long' : '');
+      valSpan.textContent = val;
+      param.appendChild(valSpan);
+
+      paramsDiv.appendChild(param);
+    }
+
+    paramSection.appendChild(paramsDiv);
+    details.appendChild(paramSection);
+  }
+
+  // Result placeholder (hidden until result arrives)
+  var resultSection = document.createElement('div');
+  resultSection.className = 'tool-section';
+  resultSection.style.display = 'none';
+  resultSection.setAttribute('data-role', 'result');
+
+  var resultLabel = document.createElement('div');
+  resultLabel.className = 'tool-section-label';
+  resultLabel.textContent = 'Result';
+  resultSection.appendChild(resultLabel);
+
+  var resultContent = document.createElement('div');
+  resultContent.className = 'tool-result-content';
+  resultSection.appendChild(resultContent);
+
+  details.appendChild(resultSection);
+  group.appendChild(details);
+
+  // Store reference for pairing with result
+  activeToolGroups[name] = group;
+
+  return group;
+}
+
+function attachToolResult(data) {
+  var name = data.name || '';
+  var group = activeToolGroups[name];
+
+  if (group) {
+    // Update icon to checkmark
+    var icon = group.querySelector('.tool-icon');
+    if (icon) icon.innerHTML = ICON_CHECK;
+
+    // Update badge
+    var badge = group.querySelector('.tool-status-badge');
+    if (badge) {
+      badge.textContent = 'done';
+      badge.className = 'tool-status-badge done';
+    }
+
+    // Show and fill result section
+    var resultSection = group.querySelector('[data-role="result"]');
+    if (resultSection) {
+      resultSection.style.display = '';
+      var contentDiv = resultSection.querySelector('.tool-result-content');
+      if (contentDiv) {
+        contentDiv.textContent = tryFormatJSON(data.content || '');
+      }
+    }
+
+    delete activeToolGroups[name];
+    return null; // merged into existing element
+  }
+
+  // Fallback: create standalone result card
+  return createStandaloneResult(data);
+}
+
+function createStandaloneResult(data) {
+  var name = data.name || 'unknown';
+  var group = document.createElement('div');
+  group.className = 'tool-group';
+
+  var header = document.createElement('div');
+  header.className = 'tool-header';
+
+  var iconSpan = document.createElement('span');
+  iconSpan.className = 'tool-icon';
+  iconSpan.innerHTML = ICON_CHECK;
+  header.appendChild(iconSpan);
+
+  var nameSpan = document.createElement('span');
+  nameSpan.className = 'tool-name';
+  nameSpan.textContent = name;
+  header.appendChild(nameSpan);
+
+  var badge = document.createElement('span');
+  badge.className = 'tool-status-badge done';
+  badge.textContent = 'done';
+  header.appendChild(badge);
+
+  var chevron = document.createElement('span');
+  chevron.className = 'tool-chevron';
+  chevron.textContent = '\u25B6';
+  header.appendChild(chevron);
+
+  header.addEventListener('click', function() {
+    group.classList.toggle('expanded');
+  });
+  group.appendChild(header);
+
+  var details = document.createElement('div');
+  details.className = 'tool-details';
+
+  var resultSection = document.createElement('div');
+  resultSection.className = 'tool-section';
+
+  var resultLabel = document.createElement('div');
+  resultLabel.className = 'tool-section-label';
+  resultLabel.textContent = 'Result';
+  resultSection.appendChild(resultLabel);
+
+  var resultContent = document.createElement('div');
+  resultContent.className = 'tool-result-content';
+  resultContent.textContent = tryFormatJSON(data.content || '');
+  resultSection.appendChild(resultContent);
+
+  details.appendChild(resultSection);
+  group.appendChild(details);
+
+  return group;
+}
+
 function setStatus(text) {
   if (text) {
     statusText.textContent = text;
@@ -60,18 +597,18 @@ function setStatus(text) {
 }
 
 function connect() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/chat`);
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/chat');
 
-  ws.onopen = () => {
+  ws.onopen = function() {
     sendBtn.disabled = false;
   };
 
-  ws.onmessage = (e) => {
-    const data = JSON.parse(e.data);
+  ws.onmessage = function(e) {
+    var data = JSON.parse(e.data);
 
     if (data.type === 'tool_call') {
-      setStatus(`Running ${data.name}...`);
+      setStatus('Running ' + data.name + '...');
     } else if (data.type === 'tool_result') {
       setStatus('Thinking...');
     }
@@ -86,7 +623,7 @@ function connect() {
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = function() {
     sendBtn.disabled = true;
     setStatus(null);
     setTimeout(connect, 2000);
@@ -94,11 +631,11 @@ function connect() {
 }
 
 function send() {
-  const text = input.value.trim();
+  var text = input.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN || waiting) return;
 
-  const div = document.createElement('div');
-  div.classList.add('msg', 'user');
+  var div = document.createElement('div');
+  div.className = 'msg user';
   div.textContent = text;
   messages.insertBefore(div, status);
 
@@ -110,37 +647,50 @@ function send() {
 }
 
 function renderMessage(data) {
-  const div = document.createElement('div');
-  div.classList.add('msg', data.type === 'tool_call' || data.type === 'tool_result' ? 'tool' : data.type);
-
+  var el;
   if (data.type === 'tool_call') {
-    div.textContent = `[${data.name}] ${JSON.stringify(data.arguments)}`;
-    div.onclick = () => div.classList.toggle('expanded');
+    el = createToolCallElement(data);
+    messages.insertBefore(el, status);
   } else if (data.type === 'tool_result') {
-    div.textContent = `[${data.name} result] ${data.content}`;
-    div.onclick = () => div.classList.toggle('expanded');
-  } else {
-    div.textContent = data.content;
+    el = attachToolResult(data);
+    if (el) {
+      messages.insertBefore(el, status);
+    }
+  } else if (data.type === 'assistant') {
+    el = document.createElement('div');
+    el.className = 'msg assistant';
+    el.innerHTML = renderMarkdown(data.content || '');
+    messages.insertBefore(el, status);
+  } else if (data.type === 'error') {
+    el = document.createElement('div');
+    el.className = 'msg error';
+    el.textContent = data.content;
+    messages.insertBefore(el, status);
+  } else if (data.type === 'user') {
+    el = document.createElement('div');
+    el.className = 'msg user';
+    el.textContent = data.content;
+    messages.insertBefore(el, status);
   }
 
-  messages.insertBefore(div, status);
   messages.scrollTop = messages.scrollHeight;
 }
 
-async function loadHistory() {
-  try {
-    const res = await fetch('/api/history');
-    const events = await res.json();
-    for (const event of events) {
-      renderMessage(event);
-    }
-  } catch (e) {
-    // History unavailable — not critical
-  }
+function loadHistory() {
+  fetch('/api/history')
+    .then(function(res) { return res.json(); })
+    .then(function(events) {
+      for (var i = 0; i < events.length; i++) {
+        renderMessage(events[i]);
+      }
+    })
+    .catch(function() {
+      // History unavailable
+    });
 }
 
 sendBtn.onclick = send;
-input.onkeydown = (e) => { if (e.key === 'Enter') send(); };
+input.onkeydown = function(e) { if (e.key === 'Enter') send(); };
 
 loadHistory();
 connect();
