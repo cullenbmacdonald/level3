@@ -126,13 +126,18 @@ async def write_capability(
             "message": str(e),
         })
 
+    # Ensure parameters_schema has "type": "object" — Bedrock rejects schemas without it
+    params_schema = parsed.parameters_schema
+    if params_schema.get("type") != "object":
+        params_schema["type"] = "object"
+
     # Register in DB
     tool_schema: dict[str, Any] = {
         "type": "function",
         "function": {
             "name": parsed.name,
             "description": parsed.description,
-            "parameters": parsed.parameters_schema,
+            "parameters": params_schema,
         },
     }
 
