@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: level3
+      POSTGRES_PASSWORD: level3
+      POSTGRES_DB: level3
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U level3"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  agent:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://level3:level3@postgres:5432/level3
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:
