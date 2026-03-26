@@ -1,6 +1,6 @@
 DB_URL := postgresql://postgres:level3@localhost:5432/level3
 
-.PHONY: dev lint fmt typecheck check rebuild-db wipe-db wipe-capabilities clean
+.PHONY: dev lint fmt typecheck check db rebuild-db wipe-db wipe-capabilities clean
 
 dev:
 	./run.sh
@@ -16,6 +16,14 @@ typecheck:
 	uv run mypy src/
 
 check: lint typecheck
+
+db:
+	@docker start level3 2>/dev/null || \
+		docker run -d --name level3 \
+			-e POSTGRES_PASSWORD=level3 \
+			-e POSTGRES_DB=level3 \
+			-p 5432:5432 \
+			postgres
 
 rebuild-db:
 	psql $(DB_URL) -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
